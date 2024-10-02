@@ -1,25 +1,31 @@
 import { EnumVariant } from "@alan404/enum";
 import { deserializeNBT, serializeNBT } from "../serde";
-import { NBTCompound, NBTTag } from "../types";
-import { NBTCompoundField, NBTFieldType, NBTListField } from ".";
+import { NBTCompound, NBTTag, NBTTagList } from "../types";
+import { NBTFieldTypeCompound, NBTFieldType, NBTFieldTypeList } from ".";
+import { NBTCompoundFields, NBTDeserializedFrom, NBTFieldMap, NBTRoot } from "./types";
 
-export const NBTCompoundFields = Symbol.for("NBTCompoundFields");
-export const NBTRoot = Symbol.for("NBTRoot");
+type Constructor<T> = { new (): T };
 
 const deserializeField = (
     field: NBTFieldType,
     tag: NBTTag,
-) => {
+): any => {
     let [tagType] = field;
 
     if(tagType == "Bool") {
         return !!tag.data;
     } else if(tagType == "Compound") {
-        let child = new (field as NBTCompoundField)[1]();
-        deserializeDocument(child, tag as EnumVariant<NBTTag, "Compound">);
-        return child;
+        let [_, Child] = field as NBTFieldTypeCompound;
+        if(Child) {
+            let child = new Child();
+            child.deserializeFromTag(tag as EnumVariant<NBTTag, "Compound">);
+            return child;
+        } else {
+            return tag.data;
+        }
+        //deserializeDocument(child, tag as EnumVariant<NBTTag, "Compound">);
     } else if (tagType == "List") {
-        let [_, inner] = field as NBTListField;
+        let [_, inner] = field as NBTFieldTypeList;
         return (tag as EnumVariant<NBTTag, "List">).data
             .map((child: NBTTag) => deserializeField(inner, child));
     } else {
@@ -30,10 +36,10 @@ const deserializeField = (
 const deserializeDocument = (
     self: NBTDocument,
     compound: EnumVariant<NBTTag, "Compound">,
-) => {
+): NBTDocument => {
     for(let [key, field] of Object.entries((self.constructor as typeof NBTDocument)[NBTCompoundFields])) {
         if(compound.data[key])
-            self[key] = deserializeField(field, compound.data[key]);
+            self[key] = deserializeField(field.type, compound.data[key]);
     }
     return self;
 };
@@ -41,14 +47,14 @@ const deserializeDocument = (
 const serializeField = (
     field: NBTFieldType,
     value: any,
-) => {
+): NBTTag => {
     let [tagType] = field;
     if(tagType == "Compound") {
         return serializeObject(value as NBTDocument);
     } else if (tagType == "List") {
-        let [_, inner] = field as NBTListField;
+        let [_, inner] = field as NBTFieldTypeList;
         return NBTTag.List(
-            ((value || []) as any[]).map(x => serializeField(inner, x))
+            ((value || []) as any[]).map(x => serializeField(inner, x)) as NBTTagList
         );
     } else if (tagType == "Bool") {
         return NBTTag.Byte(value ? 1 : 0);
@@ -60,28 +66,33 @@ const serializeField = (
 const serializeObject = <T extends NBTDocument>(doc: T) => {
     let comp = {};
     for(let [key, field] of Object.entries((doc.constructor as typeof NBTDocument)[NBTCompoundFields])) {
-        comp[key] = serializeField(field, doc[key]);
+        comp[key] = serializeField(field.type, doc[key]);
     }
     return NBTTag.Compound(comp);
 };
 
 export class NBTDocument {
-    static [NBTCompoundFields]: Record<string, NBTFieldType> = {};
+    static [NBTCompoundFields]: NBTFieldMap = {};
     [NBTRoot]: false | string = false;
+    [NBTDeserializedFrom]?: NBTCompound;
 
-    static deserialize(buffer: ArrayBuffer) {
-        return this.deserializeFromTag(deserializeNBT(buffer));
+    static deserialize<T extends NBTDocument>(this: Constructor<T>, buffer: ArrayBuffer): T {
+        return (this as unknown as NBTDocument).deserializeFromTag(deserializeNBT(buffer)) as T;
     }
 
-    static deserializeFromTag(tag: NBTCompound) {
+    static deserializeFromTag<T extends NBTDocument>(this: Constructor<T>, tag: NBTCompound): T {
+        return (new this()).deserializeFromTag(tag);
+    }
+
+    deserializeFromTag(tag: NBTCompound) {
         let compound = tag;
 
-        let self = new this();
-        if(typeof self[NBTRoot] == "string")
-            compound = compound.data[self[NBTRoot]] as EnumVariant<NBTTag, "Compound">;
+        if(typeof this[NBTRoot] == "string")
+            compound = compound.data[this[NBTRoot]] as EnumVariant<NBTTag, "Compound">;
 
-        deserializeDocument(self, compound);
-        return self;
+        deserializeDocument(this, compound);
+        this[NBTDeserializedFrom] = compound;
+        return this;
     }
 
     serializeToTag() {
